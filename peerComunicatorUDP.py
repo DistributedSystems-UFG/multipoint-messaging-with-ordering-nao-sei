@@ -1,18 +1,21 @@
 from socket import socket, AF_INET, SOCK_DGRAM, SOCK_STREAM, SOL_SOCKET, SO_REUSEADDR
-import os
-import threading
-import random
-import time
-import pickle
+import os, random, time, pickle
 from cards import valores
 from namingClient import NamingClient, get_advertised_host
 
 class PeerCommunicator:
     def __init__(self):
-        self.info = None
+        
+        # Informacoes individuais e privadas do jogo
+        self.info = {
+            "cards": None,
+            "peer_id": None,
+            "peer_name": None,
+            "parceiro": None,
+            "team": None,
+        }
 
         self.game_state = None
-        self.placar = None
 
         self.peer_id = None
         self.peer_name = None
@@ -32,11 +35,14 @@ class PeerCommunicator:
         self.server_socket.bind(('0.0.0.0', 0))
         self.server_socket.listen(1)
 
-    # "MEsa" ou estado do jogo
-    # Valores de "fase": PLAYING, MUST_PLAY, TRUCO, SEIS, DOZE
-    # o valor_mao muda de acordo com essas fases
-    def new_game_state(self):
+    def new_game_state(self, placar=None):
+        # "MEsa" ou estado do jogo
+        # Valores de "fase": PLAYING, MUST_PLAY, TRUCO, SEIS, DOZE
+        # o valor_mao muda de acordo com essas fases
+        # esse é o estado replicado entre os peers
+        previous_state = self.game_state or {}
         self.game_state = {
+            "seq": previous_state.get("seq"),
             "fase": "PLAYING",
             "id_mao": 1,
             "turno": 0,
@@ -46,7 +52,10 @@ class PeerCommunicator:
             "cartas_mesa": [],
             "vazas_ganhas": {"A": 0, "B": 0},
             "valor_mao": 1,
-            "last_request_player": None
+            "last_request_player": None,
+            "placar": placar or previous_state.get("placar", {"A": 0, "B": 0}),
+            "order": previous_state.get("order"),
+            "teams": previous_state.get("teams"),
         }
 
     ## ======== Logica de comunicação entre peers
@@ -125,13 +134,21 @@ class PeerCommunicator:
 
     ### ================ Helpers / Utils
 
+    def read_choice(self, prompt):
+        while True:
+            raw_input = input(prompt)
+            digits = "".join(char for char in raw_input if char.isdigit())
+            if digits:
+                return digits[-1]
+            print("Entrada invalida. Digite uma das opcoes numericas.")
+
     # printa a mesa com as informacoes relevantes no terminal
     def mostrar_mesa(self, cards):
         self.clear_screen()
         print(f"Jogador {self.peer_id} | Time {self.info['team']} | Parceiro {self.info['parceiro']}")
         print(f"Vaza {self.game_state['vaza']} | Turno {self.game_state['turno']} | Vez do jogador {self.game_state['current_player']}")
         print(f"Vazas ganhas: {self.game_state['vazas_ganhas']}")
-        if self.placar: print(f"Placar: A-{self.placar['A']} x B-{self.placar['B']}") 
+        if self.game_state["placar"]: print(f"Placar: A-{self.game_state['placar']['A']} x B-{self.game_state['placar']['B']}") 
         else: print(f"Placar: A-0 x B-0")
         print()
         print("Cartas na mesa:")
@@ -149,8 +166,11 @@ class PeerCommunicator:
     # Prompt (terminal) para fazer a jogada
     def prompt_jogada(self, cards):
         self.mostrar_mesa(cards)
+
+        self.game_state["seq"] += 1
         msg = {
             # "type": "", # play, truco_accept, truco, seis, doze
+            "seq": self.game_state["seq"],
             "vaza": self.game_state["vaza"],
             "turno": self.game_state["turno"],
             "valor_mao": self.game_state["valor_mao"],
@@ -164,7 +184,7 @@ class PeerCommunicator:
             if self.game_state["valor_mao"] == 1:
                 print("E sua vez, jogue uma carta ou peca truco...")
                 print("correr: 9 | pedir truco: 8")
-                inp = input("Digite sua jogada: ")
+                inp = self.read_choice("Digite sua jogada: ")
                 if inp == '9':
                     msg["type"] = "correr"
                 elif inp == '8':
@@ -176,7 +196,7 @@ class PeerCommunicator:
             elif self.game_state["valor_mao"] == 3:    # Jogo trucado
                 print("(3) E sua vez, jogue uma carta ou peca seis...")
                 print("correr: 9 | pedir seis: 8")
-                inp = input("Digite sua jogada: ")
+                inp = self.read_choice("Digite sua jogada: ")
                 if inp == '9':
                     msg["type"] = "correr"
                 elif inp == '8':
@@ -188,7 +208,7 @@ class PeerCommunicator:
             elif self.game_state["valor_mao"] == 6:   # Alguem pediu 6
                 print("(6) E sua vez, jogue uma carta ou peca doze...")
                 print("correr: 9 | pedir doze: 8")
-                inp = input("Digite sua jogada: ")
+                inp = self.read_choice("Digite sua jogada: ")
                 if inp == '9':
                     msg["type"] = "correr"
                 elif inp == '8':
@@ -200,7 +220,7 @@ class PeerCommunicator:
             elif self.game_state["valor_mao"] == 12:   # Alguem pediu 12
                 print("(12) E sua vez, jogue uma carta ou corra...")
                 print("correr: 9")
-                inp = input("Digite sua jogada: ")
+                inp = self.read_choice("Digite sua jogada: ")
                 if inp == '9':
                     msg["type"] = "correr"
                 else:
@@ -209,7 +229,7 @@ class PeerCommunicator:
                     cards.remove(cards[int(inp)])
         elif fase == "MUST_PLAY":
             print("Pedido aceito, jogue uma carta...")
-            inp = input("Digite sua jogada: ")
+            inp = self.read_choice("Digite sua jogada: ")
             msg["card"] = cards[int(inp)]
             msg["type"] = "must_play"
             cards.remove(cards[int(inp)])
@@ -217,7 +237,7 @@ class PeerCommunicator:
         elif fase == "TRUCO":    # Voce recebeu um pedido de truco
             print("E sua vez, aceite o truco, peca 6 ou corra")
             print("correr: 9 | aceitar truco: 8 | pedir seis: 7")
-            inp = input("Digite sua jogada: ")
+            inp = self.read_choice("Digite sua jogada: ")
             if inp == '9':
                 msg["type"] = "correr"
             elif inp == '8':
@@ -229,7 +249,7 @@ class PeerCommunicator:
         elif fase == "SEIS":    # Voce recebeu um pedido de seis
             print("E sua vez, aceite o seis, peca doze ou corra")
             print("correr: 9 | aceitar seis: 8 | pedir doze: 7")
-            inp = input("Digite sua jogada: ")
+            inp = self.read_choice("Digite sua jogada: ")
             if inp == '9':
                 msg["type"] = "correr"
             elif inp == '8':
@@ -241,7 +261,7 @@ class PeerCommunicator:
         elif fase == "DOZE":    # Voce recebeu um pedido de doze
             print("E sua vez, aceite o doze, peca 6 ou corra")
             print("correr: 9 | aceitar doze: 8")
-            inp = input("Digite sua jogada: ")
+            inp = self.read_choice("Digite sua jogada: ")
             if inp == '9':
                 msg["type"] = "correr"
             elif inp == '8':
@@ -294,7 +314,7 @@ class PeerCommunicator:
 
     # avança o turno e atualiza o proximo a jogar
     def avancar_turno(self):
-        order = self.info["order"]
+        order = self.game_state["order"]
         current_index = order.index(self.game_state["current_player"])
         next_index = (current_index + 1) % 4
         self.game_state["current_player"] = order[next_index]
@@ -302,7 +322,7 @@ class PeerCommunicator:
 
     # identifica qual o time do peer
     def get_team_of_player(self, player_id):
-        for team, players in self.info["teams"].items():
+        for team, players in self.game_state["teams"].items():
             if player_id in players:
                 return team
 
@@ -330,19 +350,19 @@ class PeerCommunicator:
 
     # checa se chegou/passou de 12 tentos (acabou)
     def check_gameover(self):
-        if not self.placar: 
+        if not self.game_state["placar"]: 
             return False
-        elif self.placar['A'] >= 12 or self.placar['B'] >= 12:
+        elif self.game_state["placar"]['A'] >= 12 or self.game_state["placar"]['B'] >= 12:
             return True
         return False
 
     def proximo_jogador(self, player_id):
-        order = self.info["order"]
+        order = self.game_state["order"]
         index = order.index(player_id)
         return order[(index + 1) % 4]
         
     def jogador_anterior(self, player_id):
-        order = self.info["order"]
+        order = self.game_state["order"]
         index = order.index(player_id)
         return order[(index - 1) % 4]
 
@@ -359,6 +379,7 @@ class PeerCommunicator:
     ## ================= Loop principal do jogo
     def run(self):
         self.register_with_group_manager()
+        self.new_game_state({"A": 0, "B": 0})
         while True:
             # -> Espera ate 4 jogadores entrarem
             while True:
@@ -366,24 +387,27 @@ class PeerCommunicator:
                 if response.get("status") == 'ok':
                     self.get_list_of_peers()
                     self.info = self.getParceiro(response.get("teams"))
-                    self.info["order"] = response.get("order")
+                    self.game_state["order"] = response.get("order")
                     # cicla uma vez pra baixo pras outras vezes cliclarem e ignorar a primeira mao
-                    self.info["order"] = self.info["order"][-1:] + self.info["order"][:-1] 
-                    self.info["teams"] = response.get("teams")
+                    self.game_state["order"] = self.game_state["order"][-1:] + self.game_state["order"][:-1] 
+                    self.game_state["teams"] = response.get("teams")
                     print(f"Jogadores conectados, seu time: {self.info['team']}")
                     print(f"Você é o jogador {self.peer_id}, sua dupla é o jogador: {self.info['parceiro']}")
-                    print(f"Ordem da mesa: {self.info['order']}")
+                    print(f"Ordem da mesa: {self.game_state['order']}")
                     break
                 else:
                     print("Aguardando jogadores...")
                     time.sleep(2)
             
             # -> Logica do jogo principal
-            self.new_game_state()
-            self.info["order"] = self.info["order"][1:] + self.info["order"][:1]
-            order = self.info["order"]
-            self.game_state["current_player"] = order[0]
+            placar = self.game_state["placar"]
 
+            self.new_game_state(placar)
+            self.game_state["order"] = self.game_state["order"][1:] + self.game_state["order"][:1]
+            
+            order = self.game_state["order"]
+            self.game_state["current_player"] = order[0]
+            
             cards = self.get_cards()
             
             self.mostrar_mesa(cards)
@@ -469,8 +493,8 @@ class PeerCommunicator:
                     else: 
                         time.sleep(2)           # tempo para atualizar o placar
                     req = self.send_request({"op": "placar"})
-                    self.placar = req['placar']
-                    print(f"Placar: {self.placar}")
+                    self.game_state["placar"] = req['placar']
+                    print(f"Placar: {self.game_state['placar']}")
                     game_over = self.check_gameover()
                     if game_over:
                         print("Jogo encerrado! Saindo...")
