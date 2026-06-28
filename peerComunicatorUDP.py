@@ -1,11 +1,13 @@
 from socket import socket, AF_INET, SOCK_DGRAM, SOCK_STREAM, SOL_SOCKET, SO_REUSEADDR
-import os, random, time, pickle
+import os, random, time, pickle, json, hashlib
 from cards import valores
 from namingClient import NamingClient, get_advertised_host
 
 class PeerCommunicator:
     def __init__(self):
         
+        self.msgBuffer = {}
+
         # Informacoes individuais e privadas do jogo
         self.info = {
             "cards": None,
@@ -42,7 +44,7 @@ class PeerCommunicator:
         # esse é o estado replicado entre os peers
         previous_state = self.game_state or {}
         self.game_state = {
-            "seq": previous_state.get("seq"),
+            "seq": previous_state.get("seq", 0),
             "fase": "PLAYING",
             "id_mao": 1,
             "turno": 0,
@@ -134,6 +136,10 @@ class PeerCommunicator:
 
     ### ================ Helpers / Utils
 
+    def expectedMsgInBuffer(self):
+        expected_seq = self.game_state["seq"] + 1
+        return expected_seq in self.msgBuffer
+
     def read_choice(self, prompt):
         while True:
             raw_input = input(prompt)
@@ -141,6 +147,20 @@ class PeerCommunicator:
             if digits:
                 return digits[-1]
             print("Entrada invalida. Digite uma das opcoes numericas.")
+
+    def pop_card_choice(self, cards, inp=None):
+        while True:
+            if inp is None:
+                inp = self.read_choice("Digite sua jogada: ")
+            card_index = int(inp)
+            if 0 <= card_index < len(cards):
+                return cards.pop(card_index)
+            print("Carta invalida. Escolha um indice da lista de cartas.")
+            inp = None
+
+    def game_state_hash(self):
+        state_json = json.dumps(self.game_state, sort_keys=True)
+        return hashlib.md5(state_json.encode()).hexdigest()[:8]
 
     # printa a mesa com as informacoes relevantes no terminal
     def mostrar_mesa(self, cards):
@@ -161,16 +181,15 @@ class PeerCommunicator:
         print("Suas cartas:")
         for index, carta in enumerate(cards):
             print(f"  {index}: {carta}")
-        print()
+        print("\n\n\n")
+        print("Estado: ", self.game_state_hash())
 
     # Prompt (terminal) para fazer a jogada
     def prompt_jogada(self, cards):
         self.mostrar_mesa(cards)
-
-        self.game_state["seq"] += 1
         msg = {
             # "type": "", # play, truco_accept, truco, seis, doze
-            "seq": self.game_state["seq"],
+            "seq": self.game_state["seq"] + 1,
             "vaza": self.game_state["vaza"],
             "turno": self.game_state["turno"],
             "valor_mao": self.game_state["valor_mao"],
@@ -190,9 +209,8 @@ class PeerCommunicator:
                 elif inp == '8':
                     msg["type"] = "truco"
                 else:
-                    msg["card"] = cards[int(inp)]
+                    msg["card"] = self.pop_card_choice(cards, inp)
                     msg["type"] = "play"
-                    cards.remove(cards[int(inp)])
             elif self.game_state["valor_mao"] == 3:    # Jogo trucado
                 print("(3) E sua vez, jogue uma carta ou peca seis...")
                 print("correr: 9 | pedir seis: 8")
@@ -202,9 +220,8 @@ class PeerCommunicator:
                 elif inp == '8':
                     msg["type"] = "seis"
                 else:
-                    msg["card"] = cards[int(inp)]
+                    msg["card"] = self.pop_card_choice(cards, inp)
                     msg["type"] = "play"
-                    cards.remove(cards[int(inp)])
             elif self.game_state["valor_mao"] == 6:   # Alguem pediu 6
                 print("(6) E sua vez, jogue uma carta ou peca doze...")
                 print("correr: 9 | pedir doze: 8")
@@ -214,9 +231,8 @@ class PeerCommunicator:
                 elif inp == '8':
                     msg["type"] = "doze"
                 else:
-                    msg["card"] = cards[int(inp)]
+                    msg["card"] = self.pop_card_choice(cards, inp)
                     msg["type"] = "play"
-                    cards.remove(cards[int(inp)])
             elif self.game_state["valor_mao"] == 12:   # Alguem pediu 12
                 print("(12) E sua vez, jogue uma carta ou corra...")
                 print("correr: 9")
@@ -224,15 +240,12 @@ class PeerCommunicator:
                 if inp == '9':
                     msg["type"] = "correr"
                 else:
-                    msg["card"] = cards[int(inp)]
+                    msg["card"] = self.pop_card_choice(cards, inp)
                     msg["type"] = "play"
-                    cards.remove(cards[int(inp)])
         elif fase == "MUST_PLAY":
             print("Pedido aceito, jogue uma carta...")
-            inp = self.read_choice("Digite sua jogada: ")
-            msg["card"] = cards[int(inp)]
+            msg["card"] = self.pop_card_choice(cards)
             msg["type"] = "must_play"
-            cards.remove(cards[int(inp)])
 
         elif fase == "TRUCO":    # Voce recebeu um pedido de truco
             print("E sua vez, aceite o truco, peca 6 ou corra")
@@ -376,6 +389,36 @@ class PeerCommunicator:
         else:
             self.game_state["current_player"] = previous_requester
 
+    def applyMsg(self, msg, cards):
+        winner_team = winner_player = None
+        tipo_msg = msg.get("type")
+        if tipo_msg == "play":
+            print(f"Jogador {msg.get('player_id')} esta jogando...")
+            self.game_state["cartas_mesa"].append(msg)   # coloca a jogada na minha mesa local
+            self.avancar_turno()
+        elif tipo_msg == "must_play": 
+            print(f"Jogador {msg.get('player_id')} tem que descer...")
+            self.game_state["cartas_mesa"].append(msg)   # coloca a jogada na minha mesa local
+            self.game_state["fase"] = "PLAYING"
+            self.avancar_turno()
+        elif tipo_msg in ["truco", "seis", "doze"]:    # Jogo vai para estado de "pedido de truco/6/12"
+            print(f"Jogador {msg.get('player_id')} pediu {tipo_msg}...")
+            self.registrar_pedido_truco(msg)
+        elif tipo_msg == "accept":                                  # Aceitou o pedido de truco/6/12
+            print(f"Jogador {msg.get('player_id')} aceitou o pedido de {self.game_state['fase'].lower()}...")
+            self.game_state["valor_mao"] = msg.get("valor_mao")     # Jogo comeca a valer N tentos
+            self.game_state["fase"] = "MUST_PLAY"                     # volta ao estado de jogo normal
+            self.game_state["current_player"] = self.game_state["last_request_player"]
+            self.game_state["last_request_player"] = None
+        elif(tipo_msg == "correr"):
+            print(f"Jogador {msg.get('player_id')} correu...")
+            self.game_state["fase"] = "HAND_FINISHED"
+            runner_team = self.get_team_of_player(msg["player_id"])
+            winner_team = "A" if runner_team == "B" else "B"
+            winner_player = self.jogador_anterior(msg["player_id"])
+        
+        return winner_team, winner_player
+
     ## ================= Loop principal do jogo
     def run(self):
         self.register_with_group_manager()
@@ -419,62 +462,23 @@ class PeerCommunicator:
                     # ----------- SE FOR MINHA VEZ
                     if self.game_state["current_player"] == self.peer_id:                      
                         msg = self.prompt_jogada(cards)
-                        tipo_msg = msg.get("type")
-                        self.multicast_msg(msg)                     # mando a minha jogada pros peers
-                        if(tipo_msg == "play"): 
-                            self.game_state["cartas_mesa"].append({"card": msg["card"], "player_id": msg["player_id"]})  # adiciono minha propria jogada na minha mesa
-                            self.avancar_turno()
-                            self.mostrar_mesa(cards)
-                        elif(tipo_msg == "must_play"):              # descendo qnd aceitam meu truco
-                            self.game_state["cartas_mesa"].append({"card": msg["card"], "player_id": msg["player_id"]}) 
-                            self.game_state["fase"] = "PLAYING"
-                            self.avancar_turno()
-                            self.mostrar_mesa(cards)
-                        elif tipo_msg in ["truco", "seis", "doze"]:
-                            self.registrar_pedido_truco(msg)
-                        elif(tipo_msg == "accept"):
-                            self.game_state["valor_mao"] = msg.get("valor_mao")
-                            self.game_state["fase"] = "MUST_PLAY"
-                            self.game_state["current_player"] = self.game_state["last_request_player"]
-                            self.game_state["last_request_player"] = None
-                        elif(tipo_msg == "correr"):
-                            self.game_state["fase"] = "HAND_FINISHED"
-                            runner_team = self.get_team_of_player(msg["player_id"])
-                            winner_team = "A" if runner_team == "B" else "B"
-                            winner_player = self.jogador_anterior(msg["player_id"])
-                    
+                        self.multicast_msg(msg)     
+                        winner_team, winner_player = self.applyMsg(msg, cards)
+                        self.game_state["seq"] = msg["seq"]                # mando a minha jogada pros peers
+                        self.mostrar_mesa(cards)
+
                     # ----------- SE NAO FOR MINHA VEZ
                     else:                                      
-                        msg_pack = self.recv_socket.recv(1024)  # recebe a jogada de quem for
-                        msg = pickle.loads(msg_pack)
-                        tipo_msg = msg.get("type")
-                        if tipo_msg == "play":
-                            print(f"Jogador {msg.get('player_id')} esta jogando...")
-                            self.game_state["cartas_mesa"].append(msg)   # coloca a jogada na minha mesa local
-                            self.avancar_turno()
-                            self.mostrar_mesa(cards)
-                        elif tipo_msg == "must_play": 
-                            print(f"Jogador {msg.get('player_id')} tem que descer...")
-                            self.game_state["cartas_mesa"].append(msg)   # coloca a jogada na minha mesa local
-                            self.game_state["fase"] = "PLAYING"
-                            self.avancar_turno()
-                            self.mostrar_mesa(cards)
-                        elif tipo_msg in ["truco", "seis", "doze"]:    # Jogo vai para estado de "pedido de truco/6/12"
-                            print(f"Jogador {msg.get('player_id')} pediu {tipo_msg}...")
-                            self.registrar_pedido_truco(msg)
-                        elif tipo_msg == "accept":                                  # Aceitou o pedido de truco/6/12
-                            print(f"Jogador {msg.get('player_id')} aceitou o pedido de {self.game_state['fase'].lower()}...")
-                            self.game_state["valor_mao"] = msg.get("valor_mao")     # Jogo comeca a valer N tentos
-                            self.game_state["fase"] = "MUST_PLAY"                     # volta ao estado de jogo normal
-                            self.game_state["current_player"] = self.game_state["last_request_player"]
-                            self.game_state["last_request_player"] = None
-                        elif(tipo_msg == "correr"):
-                            print(f"Jogador {msg.get('player_id')} correu...")
-                            self.game_state["fase"] = "HAND_FINISHED"
-                            runner_team = self.get_team_of_player(msg["player_id"])
-                            winner_team = "A" if runner_team == "B" else "B"
-                            winner_player = self.jogador_anterior(msg["player_id"])
+                        while not self.expectedMsgInBuffer():
+                            msg_pack = self.recv_socket.recv(1024) # recebe a jogada de quem for
+                            msg = pickle.loads(msg_pack)
+                            self.msgBuffer[msg["seq"]] = msg
 
+                        expected_seq = self.game_state["seq"] + 1
+                        msg = self.msgBuffer.pop(expected_seq)
+                        winner_team, winner_player = self.applyMsg(msg, cards)
+                        self.game_state["seq"] = msg["seq"]
+                        self.mostrar_mesa(cards)
 
                 if(not winner_team and not winner_player):
                     winner_player, winner_team = self.check_vaza_winner()    # checa quem ganhou a mao
