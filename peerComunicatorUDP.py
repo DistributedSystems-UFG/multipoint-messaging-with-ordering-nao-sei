@@ -46,7 +46,6 @@ class PeerCommunicator:
         self.game_state = {
             "seq": previous_state.get("seq", 0),
             "fase": "PLAYING",
-            "id_mao": 1,
             "turno": 0,
             "vaza": 1,
             "tentos": 1,
@@ -189,7 +188,6 @@ class PeerCommunicator:
         self.mostrar_mesa(cards)
         msg = {
             # "type": "", # play, truco_accept, truco, seis, doze
-            "seq": self.game_state["seq"] + 1,
             "vaza": self.game_state["vaza"],
             "turno": self.game_state["turno"],
             "valor_mao": self.game_state["valor_mao"],
@@ -416,8 +414,31 @@ class PeerCommunicator:
             runner_team = self.get_team_of_player(msg["player_id"])
             winner_team = "A" if runner_team == "B" else "B"
             winner_player = self.jogador_anterior(msg["player_id"])
+        elif tipo_msg == "score_update":
+            self.game_state["placar"] = msg["placar"]
+            print(f"Placar atualizado: {self.game_state['placar']}")
         
         return winner_team, winner_player
+    
+    def submit_event(self, msg):
+        req = {
+            "op": "jogada",
+            "msg": msg,
+        }
+        resp = self.send_request(req)
+        if resp.get("status") != "ok":
+            raise RuntimeError(f"Erro ao submeter jogada: {resp.get('message')}")
+
+    def receive_next_ordered_msg(self):
+        while not self.expectedMsgInBuffer():
+            msg_pack = self.recv_socket.recv(1024)
+            msg = pickle.loads(msg_pack)
+            self.msgBuffer[msg["seq"]] = msg
+
+        expected_seq = self.game_state["seq"] + 1
+        msg = self.msgBuffer.pop(expected_seq)
+        self.game_state["seq"] = msg["seq"]
+        return msg
 
     ## ================= Loop principal do jogo
     def run(self):
@@ -462,23 +483,11 @@ class PeerCommunicator:
                     # ----------- SE FOR MINHA VEZ
                     if self.game_state["current_player"] == self.peer_id:                      
                         msg = self.prompt_jogada(cards)
-                        self.multicast_msg(msg)     
-                        winner_team, winner_player = self.applyMsg(msg, cards)
-                        self.game_state["seq"] = msg["seq"]                # mando a minha jogada pros peers
-                        self.mostrar_mesa(cards)
+                        self.submit_event(msg)
 
-                    # ----------- SE NAO FOR MINHA VEZ
-                    else:                                      
-                        while not self.expectedMsgInBuffer():
-                            msg_pack = self.recv_socket.recv(1024) # recebe a jogada de quem for
-                            msg = pickle.loads(msg_pack)
-                            self.msgBuffer[msg["seq"]] = msg
-
-                        expected_seq = self.game_state["seq"] + 1
-                        msg = self.msgBuffer.pop(expected_seq)
-                        winner_team, winner_player = self.applyMsg(msg, cards)
-                        self.game_state["seq"] = msg["seq"]
-                        self.mostrar_mesa(cards)
+                    msg = self.receive_next_ordered_msg()
+                    winner_team, winner_player = self.applyMsg(msg, cards)
+                    self.mostrar_mesa(cards)
 
                 if(not winner_team and not winner_player):
                     winner_player, winner_team = self.check_vaza_winner()    # checa quem ganhou a mao
@@ -494,11 +503,8 @@ class PeerCommunicator:
                     print(f"Mao finalizada. Time vencedor: {winner_team}")
                     if self.peer_id == 0:              # So o peer 0 envia, pra nao somar o placar + vzs
                         self.send_result(winner_team)
-                    else: 
-                        time.sleep(2)           # tempo para atualizar o placar
-                    req = self.send_request({"op": "placar"})
-                    self.game_state["placar"] = req['placar']
-                    print(f"Placar: {self.game_state['placar']}")
+                    msg = self.receive_next_ordered_msg()
+                    self.applyMsg(msg, cards)
                     game_over = self.check_gameover()
                     if game_over:
                         print("Jogo encerrado! Saindo...")

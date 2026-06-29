@@ -1,4 +1,4 @@
-from socket import socket, AF_INET, SOCK_STREAM, SOL_SOCKET, SO_REUSEADDR
+from socket import socket, SOCK_DGRAM, AF_INET, SOCK_STREAM, SOL_SOCKET, SO_REUSEADDR
 import pickle
 from cards import cartas
 import random
@@ -16,8 +16,16 @@ class GroupManager:
         self.port = port if port is not None else 0
         self.membership = []
         self.server_socket = None
+        self.send_socket = socket(AF_INET, SOCK_DGRAM)
+        self.seq = 0
         self.naming_client = NamingClient()
         self.service_name = "group-manager"
+
+    def multicast_msg(self, msg):
+        msg_pack = pickle.dumps(msg)
+        for member in self.membership:
+            addr = (member["ipaddr"], int(member["port"]))
+            self.send_socket.sendto(msg_pack, addr)
 
     def start(self):
         """Inicia o loop principal do servidor."""
@@ -118,8 +126,19 @@ class GroupManager:
             valor_mao = req.get("valor_mao")
             self.placar[ganhador] += int(valor_mao)
             print(f"Placar: {self.placar}")
+            self.seq += 1
+            broadcast_msg = {
+                "type": "score_update",
+                "seq": self.seq,
+                "status": "ok",
+                "winner_team": ganhador,
+                "valor_mao": valor_mao,
+                "placar": self.placar.copy(),
+            }
+            self.multicast_msg(broadcast_msg)
             conn.send(pickle.dumps({
-                "status": "ok", 
+                "status": "ok",
+                "seq": self.seq,
             }))
             if(self.placar["A"] >= 12 or self.placar["B"] >= 12):
                 return
@@ -127,6 +146,16 @@ class GroupManager:
             conn.send(pickle.dumps({
                 "status": "ok", 
                 "placar": self.placar
+            }))
+        elif operation == "jogada":
+            self.seq += 1
+            broadcast_msg = req.get("msg")
+            broadcast_msg["seq"] = self.seq
+            broadcast_msg["status"] = "ok"
+            self.multicast_msg(broadcast_msg)
+            conn.send(pickle.dumps({
+                "status": "ok",
+                "seq": self.seq,
             }))
         elif operation == "list":
             self._list_peers(conn)
