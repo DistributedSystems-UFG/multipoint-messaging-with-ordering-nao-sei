@@ -180,8 +180,7 @@ class PeerCommunicator:
         print("Suas cartas:")
         for index, carta in enumerate(cards):
             print(f"  {index}: {carta}")
-        print("\n\n\n")
-        print("Estado: ", self.game_state_hash())
+        print()
 
     # Prompt (terminal) para fazer a jogada
     def prompt_jogada(self, cards):
