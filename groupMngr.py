@@ -225,5 +225,5 @@ class GroupManager:
 
 # Ponto de entrada
 if __name__ == "__main__":
-    manager = GroupManager()
+    manager = GroupManager(port=5678)
     manager.start()
