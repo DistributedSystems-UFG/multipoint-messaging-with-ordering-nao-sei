@@ -18,6 +18,7 @@ class PeerCommunicator:
         }
 
         self.game_state = None
+        self.last_log = ""
 
         self.peer_id = None
         self.peer_name = None
@@ -169,6 +170,8 @@ class PeerCommunicator:
         print(f"Vazas ganhas: {self.game_state['vazas_ganhas']}")
         if self.game_state["placar"]: print(f"Placar: A-{self.game_state['placar']['A']} x B-{self.game_state['placar']['B']}") 
         else: print(f"Placar: A-0 x B-0")
+        if self.last_log:
+            print(f"Evento: {self.last_log}")
         print()
         print("Cartas na mesa:")
         if self.game_state["cartas_mesa"]:
@@ -390,32 +393,32 @@ class PeerCommunicator:
         winner_team = winner_player = None
         tipo_msg = msg.get("type")
         if tipo_msg == "play":
-            print(f"Jogador {msg.get('player_id')} esta jogando...")
+            self.last_log = f"Jogador {msg.get('player_id')} jogou {msg.get('card')}"
             self.game_state["cartas_mesa"].append(msg)   # coloca a jogada na minha mesa local
             self.avancar_turno()
         elif tipo_msg == "must_play": 
-            print(f"Jogador {msg.get('player_id')} tem que descer...")
+            self.last_log = f"Jogador {msg.get('player_id')} jogou {msg.get('card')}"
             self.game_state["cartas_mesa"].append(msg)   # coloca a jogada na minha mesa local
             self.game_state["fase"] = "PLAYING"
             self.avancar_turno()
         elif tipo_msg in ["truco", "seis", "doze"]:    # Jogo vai para estado de "pedido de truco/6/12"
-            print(f"Jogador {msg.get('player_id')} pediu {tipo_msg}...")
+            self.last_log = f"Jogador {msg.get('player_id')} pediu {tipo_msg}"
             self.registrar_pedido_truco(msg)
         elif tipo_msg == "accept":                                  # Aceitou o pedido de truco/6/12
-            print(f"Jogador {msg.get('player_id')} aceitou o pedido de {self.game_state['fase'].lower()}...")
+            self.last_log = f"Jogador {msg.get('player_id')} aceitou o pedido de {self.game_state['fase'].lower()}"
             self.game_state["valor_mao"] = msg.get("valor_mao")     # Jogo comeca a valer N tentos
             self.game_state["fase"] = "MUST_PLAY"                     # volta ao estado de jogo normal
             self.game_state["current_player"] = self.game_state["last_request_player"]
             self.game_state["last_request_player"] = None
         elif(tipo_msg == "correr"):
-            print(f"Jogador {msg.get('player_id')} correu...")
+            self.last_log = f"Jogador {msg.get('player_id')} correu"
             self.game_state["fase"] = "HAND_FINISHED"
             runner_team = self.get_team_of_player(msg["player_id"])
             winner_team = "A" if runner_team == "B" else "B"
             winner_player = self.jogador_anterior(msg["player_id"])
         elif tipo_msg == "score_update":
             self.game_state["placar"] = msg["placar"]
-            print(f"Placar atualizado: {self.game_state['placar']}")
+            self.last_log = f"Placar atualizado: A-{self.game_state['placar']['A']} x B-{self.game_state['placar']['B']}"
         
         return winner_team, winner_player
     
